@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Verification Challenge</title>
+    <style>
+        /* [Same CSS styles as original HTML file] */
+    </style>
+</head>
+<body>
+    <!-- [Same HTML structure as original file] -->
+    
+    <script type="module">
+        import vision from "https://cdn.jsdelivr.net/npm/ @mediapipe/tasks-vision@0.10.3";
+        const { FaceLandmarker, FilesetResolver, DrawingUtils } = vision;
+        
+        // DOM Elements
+        const videoBlendShapes = document.getElementById("video-blend-shapes");
+        const instructionText = document.getElementById("instruction-text");
+        const visualCue = document.getElementById("visual-cue");
+        const loadingMessage = document.getElementById("loading-message");
+        const webCam = document.getElementById("webcam");
+        const placeholder = document.getElementById('placeholder');
+        const challengeCompleteOverlay = document.getElementById('challenge-complete');
+        const completeTitle = document.getElementById('complete-title');
+        const completeEmoji = document.getElementById('complete-emoji');
+        const completeMessage = document.getElementById('complete-message');
+        const nextChallengeBtn = document.getElementById('next-challenge-btn');
+        const confettiContainer = document.getElementById('confetti-container');
+        const distanceDisplay = document.getElementById('distance-display');
+        const distanceChallengeInfo = document.getElementById('distance-challenge-info');
+        const distanceRange = document.getElementById('distance-range');
+        const faceVisibilityStatus = document.getElementById('face-visibility-status');
+        const faceCameraVisibilityDistanceStatus = document.getElementById('face-camera-visibility-distance-status');
+        const progressPercentage = document.getElementById('progress-percentage');
+        const progressLabel = document.getElementById('progress-label');
+        const progressFill = document.getElementById('progress-fill');
+        const faceOutline = document.getElementById('face-outline');
+        const webcamButton = document.getElementById('webcamButton');
+        
+        let faceLandmarker;
+        let runningMode = "IMAGE";
+        let webcamRunning = false;
+        const videoWidth = 400;
+        
+        // Distance calculation variables
+        let currentDistance = 0;
+        const IRIS_WIDTH_MM = 11.7;
+        const NORMALIZED_FOCAL_X = 1.40625;
+        
+        // Face visibility check landmarks
+        const FACE_BOUNDARY_LANDMARKS = [68, 108, 337, 301, 345, 411, 426, 199, 32, 187, 147, 116, 139];
+        let isFaceVisible = false;
+        let isFaceProperlyPositioned = false;
+        
+        // Challenges array
+        const challenges = [
+            {
+                name: "Look Up",
+                key: "browInnerUp",
+                threshold: 0.7,
+                cue: "↑",
+                animation: "bounce",
+                instruction: "Raise your eyebrows",
+                emoji: "😮",
+                completionMessage: "Great job raising your eyebrows!"
+            },
+            {
+                name: "Open Mouth",
+                key: "jawOpen",
+                threshold: 0.4,
+                cue: "👄",
+                animation: "pulse",
+                instruction: "Open your mouth wide",
+                emoji: "😲",
+                completionMessage: "Perfect mouth opening!"
+            },
+            {
+                name: "Look Left",
+                key: "eyeLookInRight",
+                threshold: 0.9,
+                cue: "→",
+                animation: "bounce",
+                instruction: "Look to your left",
+                emoji: "👀",
+                completionMessage: "Nice eye movement to the left!"
+            },
+            {
+                name: "Look Right",
+                key: "eyeLookOutRight",
+                threshold: 0.9,
+                cue: "←",
+                animation: "bounce",
+                instruction: "Look to your right",
+                emoji: "👁️",
+                completionMessage: "Excellent eye movement to the right!"
+            },
+            {
+                name: "Move Closer",
+                key: "distance",
+                threshold: 0,
+                cue: "📏",
+                animation: "pulse",
+                instruction: "Move closer to the camera",
+                emoji: "📍",
+                completionMessage: "Perfect! You moved closer to the camera!",
+                isDistance: true,
+                targetDistance: 25,
+                distanceRange: 5
+            },
+            {
+                name: "Move Away",
+                key: "distance",
+                threshold: 0,
+                cue: "📏",
+                animation: "pulse",
+                instruction: "Move away from the camera",
+                emoji: "📏",
+                completionMessage: "Excellent! You moved away from the camera!",
+                isDistance: true,
+                targetDistance: 50,
+                distanceRange: 8
+            }
+        ];
+        
+        let currentChallengeIndex = 0;
+        let isSystemReady = false;
+        let challengeProgress = 0;
+        let challengeStartTime = 0;
+        const CHALLENGE_HOLD_TIME = 1000;
+        let overallProgress = 0;
+        
+        // Create confetti elements
+        function createConfetti() {
+            confettiContainer.innerHTML = '';
+            const colors = ['#00e5ff', '#4caf50', '#ffeb3b', '#ff5722', '#9c27b0'];
+            for (let i = 0; i < 100; i++) {
+                const confetti = document.createElement('div');
+                confetti.classList.add('confetti');
+                confetti.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+                confetti.style.left = Math.random() * 100 + 'vw';
+                confetti.style.animationDelay = Math.random() * 3 + 's';
+                confetti.style.animationDuration = Math.random() * 2 + 2 + 's';
+                confetti.style.animation = 'fall ' + (Math.random() * 2 + 2) + 's linear forwards';
+                confettiContainer.appendChild(confetti);
+            }
+        }
+        
+        async function createFaceLandmarker() {
+            const filesetResolver = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/ @mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task `,
+                    delegate: "GPU"
+                },
+                outputFaceBlendshapes: true,
+                outputFaceLandmarks: true,
+                runningMode,
+                numFaces: 1
+            });
+        }
+        
+        createFaceLandmarker();
+        
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        
+        function hasGetUserMedia() {
+            return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        }
+        
+        if (hasGetUserMedia()) {
+            webcamButton.addEventListener("click", enableCam);
+        } else {
+            console.warn("getUserMedia() is not supported by your browser");
+        }
+        
+        // Check if face is fully visible in frame
+        function checkFaceVisibility(landmarks) {
+            if (!landmarks || landmarks.length === 0) return false;
+            const margin = 30;
+            const canvasWidth = canvasElement.width;
+            const canvasHeight = canvasElement.height;
+            for (const pointIndex of FACE_BOUNDARY_LANDMARKS) {
+                if (pointIndex < landmarks.length) {
+                    const point = landmarks[pointIndex];
+                    const x = point.x * canvasWidth;
+                    const y = point.y * canvasHeight;
+                    if (x < margin || x > canvasWidth - margin || 
+                        y < margin || y > canvasHeight - margin) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        
+        // Calculate distance based on iris width
+        function calculateDistance(landmarks) {
+            if (!landmarks || landmarks.length === 0) return 0;
+            const leftIrisLandmarks = [468, 469, 470, 471, 472];
+            let irisLeftMinX = -1;
+            let irisLeftMaxX = -1;
+            for (const pointIndex of leftIrisLandmarks) {
+                if (pointIndex < landmarks.length) {
+                    const point = landmarks[pointIndex];
+                    const x = point.x * canvasElement.width;
+                    if (irisLeftMinX === -1 || x < irisLeftMinX) {
+                        irisLeftMinX = x;
+                    }
+                    if (irisLeftMaxX === -1 || x > irisLeftMaxX) {
+                        irisLeftMaxX = x;
+                    }
+                }
+            }
+            if (irisLeftMinX !== -1 && irisLeftMaxX !== -1) {
+                const dx = irisLeftMaxX - irisLeftMinX;
+                const fx = Math.min(canvasElement.width, canvasElement.height) * NORMALIZED_FOCAL_X;
+                const distance = (fx * (IRIS_WIDTH_MM / dx)) / 10.0;
+                return Math.max(0, distance);
+            }
+            return 0;
+        }
+        
+        // Update UI status based on face positioning
+        function updateFacePositionStatus() {
+            if (!isFaceVisible) {
+                faceVisibilityStatus.className = 'status-message error';
+                faceVisibilityStatus.textContent = '⚠ No face detected - position yourself in the frame';
+                faceVisibilityStatus.classList.remove('hidden');
+                faceCameraVisibilityDistanceStatus.classList.add('hidden');
+                faceOutline.classList.remove('active');
+                webcamButton.disabled = true;
+                isFaceProperlyPositioned = false;
+            } else if (currentDistance > 60) {
+                faceVisibilityStatus.className = 'status-message warning';
+                faceVisibilityStatus.textContent = '⚠ Move closer to the camera';
+                faceCameraVisibilityDistanceStatus.className = 'status-message warning';
+                faceCameraVisibilityDistanceStatus.textContent = `Current distance: ${currentDistance.toFixed(1)}cm - Move closer`;
+                faceVisibilityStatus.classList.remove('hidden');
+                faceCameraVisibilityDistanceStatus.classList.remove('hidden');
+                faceOutline.classList.remove('active');
+                webcamButton.disabled = true;
+                isFaceProperlyPositioned = false;
+            } else if (currentDistance < 20) {
+                faceVisibilityStatus.className = 'status-message warning';
+                faceVisibilityStatus.textContent = '⚠ Move away from the camera';
+                faceCameraVisibilityDistanceStatus.className = 'status-message warning';
+                faceCameraVisibilityDistanceStatus.textContent = `Current distance: ${currentDistance.toFixed(1)}cm - Move away`;
+                faceVisibilityStatus.classList.remove('hidden');
+                faceCameraVisibilityDistanceStatus.classList.remove('hidden');
+                faceOutline.classList.remove('active');
+                webcamButton.disabled = true;
+                isFaceProperlyPositioned = false;
+            } else {
+                faceVisibilityStatus.className = 'status-message success';
+                faceVisibilityStatus.textContent = '✓ Face positioned correctly';
+                faceCameraVisibilityDistanceStatus.className = 'status-message success';
+                faceCameraVisibilityDistanceStatus.textContent = `✓ Distance: ${currentDistance.toFixed(1)}cm - Perfect!`;
+                faceVisibilityStatus.classList.remove('hidden');
+                faceCameraVisibilityDistanceStatus.classList.remove('hidden');
+                faceOutline.classList.add('active');
+                webcamButton.disabled = false;
+                isFaceProperlyPositioned = true;
+            }
+        }
+        
+        function showCompletionOverlay(challenge) {
+            completeTitle.textContent = `Challenge ${currentChallengeIndex + 1} Completed!`;
+            completeEmoji.textContent = challenge.emoji;
+            completeMessage.textContent = challenge.completionMessage;
+            challengeCompleteOverlay.classList.add('show');
+            createConfetti();
+            if (currentChallengeIndex < challenges.length - 1) {
+                nextChallengeBtn.textContent = "Next Challenge";
+                nextChallengeBtn.onclick = () => {
+                    challengeCompleteOverlay.classList.remove('show');
+                    currentChallengeIndex++;
+                    startChallenge();
+                    setTimeout(() => {
+                        confettiContainer.innerHTML = '';
+                    }, 300);
+                };
+            } else {
+                nextChallengeBtn.textContent = "Complete";
+                nextChallengeBtn.onclick = () => {
+                    challengeCompleteOverlay.classList.remove('show');
+                    progressPercentage.textContent = "100%";
+                    progressLabel.textContent = "Verification Complete!";
+                    progressFill.style.width = "100%";
+                    instructionText.textContent = "All challenges completed!";
+                    visualCue.textContent = "🏆";
+                    webcamButton.textContent = "Restart";
+                    webcamButton.onclick = () => {
+                        currentChallengeIndex = 0;
+                        overallProgress = 0;
+                        startChallenge();
+                    };
+                    setTimeout(() => {
+                        confettiContainer.innerHTML = '';
+                    }, 300);
+                };
+            }
+        }
+        
+        function enableCam(event) {
+            if (!faceLandmarker) {
+                console.log("Wait! faceLandmarker not loaded yet.");
+                return;
+            }
+            if (!isFaceProperlyPositioned) {
+                return;
+            }
+            if (webcamRunning === true) {
+                webcamRunning = false;
+                webcamButton.textContent = "Start Challenge";
+            } else {
+                webcamRunning = true;
+                webcamButton.classList.add("hidden");
+                const constraints = { video: { width: videoWidth, height: videoWidth * 0.75 } };
+                navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+                    video.srcObject = stream;
+                    video.addEventListener("loadeddata", predictWebcam);
+                    loadingMessage.classList.remove("hidden");
+                    video.classList.remove('hidden');
+                    placeholder.classList.add('hidden');
+                });
+            }
+        }
+        
+        function startChallenge() {
+            if (currentChallengeIndex < challenges.length) {
+                const currentChallenge = challenges[currentChallengeIndex];
+                challengeProgress = 0;
+                challengeStartTime = 0;
+                instructionText.textContent = `Challenge ${currentChallengeIndex + 1}: ${currentChallenge.instruction}`;
+                visualCue.textContent = currentChallenge.cue;
+                progressLabel.textContent = currentChallenge.name;
+                visualCue.classList.remove(...visualCue.classList);
+                visualCue.classList.add(currentChallenge.animation);
+                loadingMessage.classList.add("hidden");
+                webcamButton.classList.remove("hidden");
+                webcamButton.textContent = "Start Challenge";
+                
+                // Show/hide distance challenge info
+                if (currentChallenge.isDistance) {
+                    distanceChallengeInfo.classList.remove('hidden');
+                    distanceRange.textContent = `Target distance: ${currentChallenge.targetDistance}cm (±${currentChallenge.distanceRange}cm)`;
+                } else {
+                    distanceChallengeInfo.classList.add('hidden');
+                }
+                
+                // Update overall progress
+                overallProgress = (currentChallengeIndex / challenges.length) * 100;
+                progressPercentage.textContent = `${Math.round(overallProgress)}%`;
+                progressFill.style.width = `${overallProgress}%`;
+            }
+        }
+        
+        let lastVideoTime = -1;
+        let results = undefined;
+        const drawingUtils = new DrawingUtils(canvasElement.getContext("2d"));
+        
+        async function predictWebcam() {
+            const radio = video.videoHeight / video.videoWidth;
+            video.style.width = videoWidth + "px";
+            video.style.height = videoWidth * radio + "px";
+            canvasElement.style.width = videoWidth + "px";
+            canvasElement.style.height = videoWidth * radio + "px";
+            canvasElement.width = video.videoWidth;
+            canvasElement.height = video.videoHeight;
+            
+            if (runningMode === "IMAGE") {
+                runningMode = "VIDEO";
+                await faceLandmarker.setOptions({ runningMode: runningMode });
+            }
+            
+            let startTimeMs = performance.now();
+            if (lastVideoTime !== video.currentTime) {
+                lastVideoTime = video.currentTime;
+                results = faceLandmarker.detectForVideo(video, startTimeMs);
+            }
+            
+            if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                // Check face visibility
+                isFaceVisible = checkFaceVisibility(results.faceLandmarks[0]);
+                
+                // Calculate and display distance
+                currentDistance = calculateDistance(results.faceLandmarks[0]);
+                distanceDisplay.textContent = `Distance: ${currentDistance.toFixed(1)} cm`;
+                
+                // Draw on canvas
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                
+                // Draw distance
+                canvasCtx.fillStyle = "red";
+                canvasCtx.font = "20px Arial";
+                canvasCtx.fillText(`${currentDistance.toFixed(1)} cm`, canvasElement.width * 0.75, 30);
+                
+                // Draw face visibility status
+                canvasCtx.fillStyle = isFaceVisible ? "green" : "orange";
+                canvasCtx.font = "16px Arial";
+                canvasCtx.fillText(isFaceVisible ? "Face Visible ✓" : "Position Face Properly", 10, 30);
+                
+                // Update face visibility status in UI
+                updateFacePositionStatus();
+            } else {
+                isFaceVisible = false;
+                faceVisibilityStatus.className = 'status-message error';
+                faceVisibilityStatus.textContent = '⚠ No face detected - position yourself in the frame';
+                faceVisibilityStatus.classList.remove('hidden');
+                faceCameraVisibilityDistanceStatus.classList.add('hidden');
+                faceOutline.classList.remove('active');
+                webcamButton.disabled = true;
+            }
+            
+            if (results.faceBlendshapes) {
+                drawBlendShapes(videoBlendShapes, results.faceBlendshapes);
+                
+                if (!isSystemReady && results.faceBlendshapes.length > 0) {
+                    isSystemReady = true;
+                    startChallenge();
+                }
+                
+                checkChallenge(results.faceBlendshapes);
+            }
+            
+            if (webcamRunning === true) {
+                window.requestAnimationFrame(predictWebcam);
+            }
+        }
+        
+        function drawBlendShapes(el, blendShapes) {
+            if (!blendShapes.length) {
+                return;
+            }
+            let htmlMaker = "";
+            blendShapes[0].categories
+                .filter((shape) => challenges.map(c => c.key).includes(shape.categoryName))
+                .map((shape) => {
+                    htmlMaker += `
+                        <li class="blend-shapes-item">
+                            <span class="blend-shapes-label">${shape.displayName || shape.categoryName}</span>
+                            <span class="blend-shapes-value" style="width: calc(${+shape.score * 100}% - 120px)">${(+shape.score).toFixed(4)}</span>
+                        </li>
+                    `;
+                });
+            el.innerHTML = htmlMaker;
+        }
+        
+        function checkChallenge(blendShapes) {
+            if (!blendShapes.length) return;
+            
+            const currentChallenge = challenges[currentChallengeIndex];
+            let challengeMet = false;
+            let progress = 0;
+            
+            // Only proceed with challenge if face is visible
+            if (!isFaceVisible || currentDistance > 60 || currentDistance < 20) {
+                challengeStartTime = 0;
+                return;
+            }
+            
+            if (currentChallenge.isDistance) {
+                // Distance challenge
+                if (currentDistance > 0) {
+                    const targetDistance = currentChallenge.targetDistance;
+                    const tolerance = currentChallenge.distanceRange;
+                    const distance = Math.abs(currentDistance - targetDistance);
+                    if (distance <= tolerance) {
+                        challengeMet = true;
+                        progress = 1;
+                    } else {
+                        progress = Math.max(0, 1 - (distance / 100));
+                    }
+                }
+            } else {
+                // Regular blend shape challenge
+                const shape = blendShapes[0].categories.find(c => c.categoryName === currentChallenge.key);
+                if (shape) {
+                    progress = Math.min(shape.score / currentChallenge.threshold, 1);
+                    challengeMet = shape.score >= currentChallenge.threshold;
+                }
+            }
+            
+            // Update progress indicator
+            const rotation = progress * 360;
+            progressPercentage.textContent = `${Math.round(progress * 100)}%`;
+            progressFill.style.width = `${progress * 100}%`;
+            
+            // Check if challenge is met and held for required time
+            if (challengeMet) {
+                if (challengeStartTime === 0) {
+                    challengeStartTime = Date.now();
+                }
+                const holdTime = Date.now() - challengeStartTime;
+                const holdProgress = Math.min(holdTime / CHALLENGE_HOLD_TIME, 1);
+                
+                if (holdTime >= CHALLENGE_HOLD_TIME) {
+                    // Challenge completed
+                    showCompletionOverlay(currentChallenge);
+                }
+            } else {
+                challengeStartTime = 0;
+            }
+        }
+        
+        nextChallengeBtn.addEventListener('click', () => {
+            challengeCompleteOverlay.classList.remove('show');
+            if (currentChallengeIndex < challenges.length - 1) {
+                currentChallengeIndex++;
+                startChallenge();
+            } else {
+                instructionText.innerText = "All challenges completed!";
+                visualCue.innerText = "🏆";
+                visualCue.classList.add("celebrate");
+            }
+        });
+    </script>
+</body>
+</html>
